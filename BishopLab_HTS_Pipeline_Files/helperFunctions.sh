@@ -1,0 +1,602 @@
+#!/bin/bash
+
+# Usage info
+
+usage() {
+  echo
+  echo "###############################################################################################################################"
+  cat $scriptDir/ascii.txt
+  echo "###############################################################################################################################"
+  echo
+  echo "BishopLab_HTS_Pipeline [-m mode] [-a SRP_accession] [-p project_directory] [-g genome_directory] [-P num_threads] "
+  echo
+  echo "General options:"
+  echo
+  echo "  -m|--mode              mode      Choose analysis mode ('genomeBuild', 'RNASeq', 'HiCSeq', or 'ChIPSeq')"
+  echo "  -a|--accession         SRA       SRA accession to download data from. [e.g. SRP045672]."
+  echo "  -l|--accessionList     file      File with newline-separated list of SRA accessions."
+  echo "  -c|--python27Env       env       If in ChIPSeq mode or running TEcount, name of conda env with python 2.7."
+  echo "  -p|--projectDir        dir       Project directory. [default = 'RNASeq_SRA_Pipeline_Project']"
+  echo "  -g|--genomeDir         dir       Genome directory. [Not required if genome built with '-m genomeBuild']"
+  echo "  -P|--num_threads       int       Specify number of threads. [default = 1]"
+  echo "  --synapseID            synID     Parent of desired synapse file directory."
+  echo "  --synapseIDList        file      File with newline-separated list of synpaseIDs (samples or sample folders)."  
+  echo "  --synUserName          uName     Synapse username for downloading data (if --synapseID is specified)."
+  echo "  --runInfoFile          file      SRA run info table file (optional)."
+  echo "  --noFastp                        Do not use fastp to perform adapter trimming, filtering, and fastq QC."
+  echo "  --keepFastq                      Do not delete fastq files once processing is finished."
+  echo "  --downloadOnly                   Will only download fastqs, merge tech replicates + do fastp (--mode not required)."
+  echo "  --returnBamsOnly                 Returns bams, coverage tracks, and normalized signal tracks."
+  echo "  --noMerge                        Do not attempt to merge technical replicates from SRA."
+  echo "  --help                           Display usage info"
+  echo
+  echo "genomeBuild --mode options:"
+  echo
+  echo "  -s|--species           str       Select 'human', 'mouse', or 'both' [default = 'both']."
+  echo "  -t|--toBuild           str       's' [Salmon] 'S' [STAR] 'f' [STAR-Fusion] 'b' [BWA] Default: 'sSfb'"
+  echo
+  echo "RNASeq --mode options: "
+  echo
+  echo "  -r|--testsRNASeq       string    's' [salmon] 't' [TECount] 'S' [Splicing-STAR] 'f' [STAR-Fusion] Default: 'stSf'"
+  echo "  --starFusionEnv        env       Conda ENV with STAR-Fusion and STAR 2.7.0 [Due to conflict with 2.7.1]."
+  echo "  --force_spliceSE                 Not recommended: If 'S' in tests, single-end reads are run with splicing STAR."
+  echo "  --force_fusionSE                 Not recommended: If 'f' in tests, single-end reads are run with STAR-fusion."
+  echo
+  echo "ChIPSeq --mode options: "
+  echo
+  echo "  -G|--groupFile         file      TSV with columns 'SampleName', 'Group', 'Replicate', and 'Condition'. Can include 'PeakType'."
+  echo
+  echo
+  echo  
+}
+
+usageDetail() {
+echo "Required columns in the runInfo file if user-supplied:"
+echo "'species': with 'human' or 'mouse' as entries"
+echo "'Experiment': Is identical to 'Run' if no technical replicates."
+echo "'Run': the name of each sequencing file. e.g. 'ATMsiRNA' is the Run for 'ATMsiRNA_1.fastq'"
+echo "If there are technical replicates, they will be merged using the 'Run' and 'Experiment' columns. For example:"
+echo
+echo "'Run': 'APBX2.1', 'APBX2.2', 'APBX2.3'; 'Experiment': 'APBX2', 'APBX2', 'APBX2'"
+echo "Fastq files are merged 'APBX2.1_1.fastq' + 'APBX2.2_1.fastq' + 'APBX2.3_1.fastq' -> 'APBX2_1.fastq'"
+}
+
+
+genomeBuild () {
+  echo
+  echo "$(date "+%m%d%Y %T") : Starting genome build"
+  echo
+  if [ $species == human ] || [ $species == both ]; then
+  
+    (mkdir $genomeDirTop/human) &>/dev/null
+    (mkdir $genomeDirTop/human/Fasta_Files) &>/dev/null
+    (mkdir $genomeDirTop/human/Assembly_Files) &>/dev/null
+    
+    if echo $toBuild | grep -q 'f'; then
+      if [ ! -d $genomeDirTop/human/ctat_genome_lib_build_dir ]; then
+        # Get CTAT library
+        echo "Getting human CTAT resource library! ... "
+        date
+        echo
+        echo "Any CTAT resource library may take several hours to completely download and is only required for running STAR-Fusion in RNASeq mode ... "
+        echo "Consider setting --toBuild as 'sSb' instead ... "
+        echo
+        wget -q -O $genomeDirTop/human/ctat_genome_lib_build_dir.tar.gz https://data.broadinstitute.org/Trinity/CTAT_RESOURCE_LIB/GRCh38_gencode_v29_CTAT_lib_Mar272019.plug-n-play.tar.gz && tar -xvzf $genomeDirTop/human/ctat_genome_lib_build_dir.tar.gz -C $genomeDirTop/human && cp -r $genomeDirTop/human/GRCh38_gencode_v29_CTAT_lib_Mar272019.plug-n-play/ctat_genome_lib_build_dir $genomeDirTop/human/ && rm -r $genomeDirTop/human/GRCh38_gencode_v29_CTAT_lib_Mar272019.plug-n-play && rm $genomeDirTop/human/ctat_genome_lib_build_dir.tar.gz && echo "Human CTAT resource library is installed!" && date &
+        sleep 5
+      fi
+    fi
+    
+    
+    # Get the genome files from gencode and hammell lab
+    echo "Downloading and gunzipping GRCh38 files ... "
+    if [ ! -f $genomeDirTop/human/Fasta_Files/GRCh38.primary_assembly.genome.fa ]; then
+      wget -q -O $genomeDirTop/human/Fasta_Files/GRCh38.primary_assembly.genome.fa.gz ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_30/GRCh38.primary_assembly.genome.fa.gz
+      gunzip $genomeDirTop/human/Fasta_Files/GRCh38.primary_assembly.genome.fa.gz
+    else
+      echo "Primary assembly already found ... skipping"
+    fi
+    if [ ! -f $genomeDirTop/human/Fasta_Files/gencode.v30.transcripts.fa ]; then
+      wget -q -O $genomeDirTop/human/Fasta_Files/gencode.v30.transcripts.fa.gz ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_30/gencode.v30.transcripts.fa.gz
+      gunzip $genomeDirTop/human/Fasta_Files/gencode.v30.transcripts.fa.gz
+    else
+      echo "Transcripts fasta already found ... skipping"
+    fi
+    if [ ! -f $genomeDirTop/human/Assembly_Files/Genes.gtf ]; then
+      wget -q -O $genomeDirTop/human/Assembly_Files/Genes.gtf.gz ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_30/gencode.v30.annotation.gtf.gz
+      gunzip $genomeDirTop/human/Assembly_Files/Genes.gtf.gz
+    else
+      echo "Genes GTF already found ... skipping"    
+    fi
+    if [ ! -f $genomeDirTop/human/Assembly_Files/TE.gtf ]; then
+      wget -q -O $genomeDirTop/human/Assembly_Files/TE.gtf.gz http://labshare.cshl.edu/shares/mhammelllab/www-data/TEToolkit/TE_GTF/GRCh38_rmsk_TE.gtf.gz
+      gunzip $genomeDirTop/human/Assembly_Files/TE.gtf.gz
+    fi
+    echo "DONE"
+    # Build indices
+    if echo $toBuild | grep -q 'b'; then
+      echo
+      echo "Processing BWA index ... "
+      echo
+      (mkdir $genomeDirTop/human/BWA_Genome_Index) &>/dev/null
+      if [ ! -f $genomeDirTop/human/BWA_Genome_Index/BWA_Genome_Index.sa ]; then
+        bwa index -p $genomeDirTop/human/BWA_Genome_Index/BWA_Genome_Index $genomeDirTop/human/Fasta_Files/GRCh38.primary_assembly.genome.fa && echo "DONE" &
+      else
+        echo "bwa index already found ... skipping"
+      fi
+    fi
+    if echo $toBuild | grep -q 's'; then
+      echo
+      echo "Processing Salmon index ... "
+      echo
+      if [ ! -f $genomeDirTop/human/Assembly_Files/decoyTranscripts/decoys.txt ]; then
+        bash $scriptDir/generateDecoyTranscriptome.sh -j $threads -a $genomeDirTop/human/Assembly_Files/Genes.gtf -g $genomeDirTop/human/Fasta_Files/GRCh38.primary_assembly.genome.fa -t $genomeDirTop/human/Fasta_Files/gencode.v30.transcripts.fa -o $genomeDirTop/human/Assembly_Files/decoyTranscripts
+      else
+        echo "Decoy transcripts already found ... skipping "
+      fi
+      if [ ! -f $genomeDirTop/human/Salmon_Transcripts_Index/sa.bin ]; then
+        salmon index --gencode -t $genomeDirTop/human/Assembly_Files/decoyTranscripts/gentrome.fa -i $genomeDirTop/human/Salmon_Transcripts_Index/ -p $threads -d $genomeDirTop/human/Assembly_Files/decoyTranscripts/decoys.txt
+      else
+        echo "Salmon index already found ... skipping"
+      fi
+      echo "DONE"
+    fi
+    if echo $toBuild | grep -q 'S'; then
+      echo
+      echo "Processing STAR index ... "
+      echo
+      (mkdir $genomeDirTop/human/STAR_Genome_Index) &>/dev/null
+      if [ ! -f $genomeDirTop/human/STAR_Genome_Index/SA ]; then
+        STAR --runThreadN $threads --runMode genomeGenerate --genomeDir $genomeDirTop/human/STAR_Genome_Index/ --genomeFastaFiles $genomeDirTop/human/Fasta_Files/GRCh38.primary_assembly.genome.fa --sjdbGTFfile $genomeDirTop/human/Assembly_Files/Genes.gtf
+      else
+        echo "STAR index already found ... skipping"
+      fi
+      echo "DONE"
+    fi
+  fi
+  if [ $species == mouse ] || [ $species == both ]; then
+
+    (mkdir $genomeDirTop/mouse) &>/dev/null
+    (mkdir $genomeDirTop/mouse/Fasta_Files) &>/dev/null
+    (mkdir $genomeDirTop/mouse/Assembly_Files) &>/dev/null
+    
+    if [ ! -d $genomeDirTop/mouse/ctat_genome_lib_build_dir ]; then
+    echo "Getting mouse CTAT resource library! ... "
+    echo
+    echo "Any CTAT resource library may take several hours to completely download and is only required for running STAR-Fusion in RNASeq mode ... "
+    echo "Consider setting --toBuild as 'sSb' instead ... "
+    echo
+      date
+      wget -q -O $genomeDirTop/mouse/Mouse_gencode_M20_CTAT_lib_Mar272019.plug-n-play.tar.gz https://data.broadinstitute.org/Trinity/CTAT_RESOURCE_LIB/Mouse_gencode_M20_CTAT_lib_Mar272019.plug-n-play.tar.gz && tar -xvzf $genomeDirTop/mouse/Mouse_gencode_M20_CTAT_lib_Mar272019.plug-n-play.tar.gz -C $genomeDirTop/mouse/ && cp -r $genomeDirTop/mouse/Mouse_gencode_M20_CTAT_lib_Mar272019.plug-n-play/ctat_genome_lib_build_dir $genomeDirTop/mouse/ && rm -r $genomeDirTop/mouse/Mouse_gencode_M20_CTAT_lib_Mar272019.plug-n-play && rm $genomeDirTop/mouse/Mouse_gencode_M20_CTAT_lib_Mar272019.plug-n-play.tar.gz && echo "CTAT_Resource_Lib is built!" && date &
+      sleep 5
+    fi
+    
+    # Get the genome files from gencode and hammell lab
+    echo "Downloading and gunzipping GRCh38 files ... "
+    if [ ! -f $genomeDirTop/mouse/Fasta_Files/GRCm38.primary_assembly.genome.fa ]; then
+      wget -q -O $genomeDirTop/mouse/Fasta_Files/GRCm38.primary_assembly.genome.fa.gz ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M21/GRCm38.primary_assembly.genome.fa.gz
+      gunzip $genomeDirTop/mouse/Fasta_Files/GRCm38.primary_assembly.genome.fa.gz
+    else
+      echo "Primary assembly already found ... skipping"
+    fi
+    if [ ! -f $genomeDirTop/mouse/Fasta_Files/gencode.vM21.transcripts.fa ]; then
+      wget -q -O $genomeDirTop/mouse/Fasta_Files/gencode.vM21.transcripts.fa.gz ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M21/gencode.vM21.transcripts.fa.gz
+      gunzip $genomeDirTop/mouse/Fasta_Files/gencode.vM21.transcripts.fa.gz
+    else
+      echo "Transcripts fasta already found ... skipping"
+    fi
+    if [ ! -f $genomeDirTop/mouse/Assembly_Files/Genes.gtf ]; then
+      wget -q -O $genomeDirTop/mouse/Assembly_Files/Genes.gtf.gz ftp://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_mouse/release_M21/gencode.vM21.annotation.gtf.gz
+      gunzip $genomeDirTop/mouse/Assembly_Files/Genes.gtf.gz
+    else
+      echo "Genes GTF already found ... skipping"    
+    fi
+    if [ ! -f $genomeDirTop/mouse/Assembly_Files/TE.gtf ]; then
+      wget -q -O $genomeDirTop/mouse/Assembly_Files/TE.gtf.gz http://labshare.cshl.edu/shares/mhammelllab/www-data/TEToolkit/TE_GTF/GRCm38_rmsk_TE.gtf.gz
+      gunzip $genomeDirTop/mouse/Assembly_Files/TE.gtf.gz
+    fi
+    echo "DONE"
+    
+    # Build indices
+    if echo $toBuild | grep -q 'b'; then
+      echo
+      echo "Processing BWA index ... "
+      echo
+      (mkdir $genomeDirTop/mouse/BWA_Genome_Index) &>/dev/null
+      if [ ! -f $genomeDirTop/mouse/BWA_Genome_Index/BWA_Genome_Index.sa ]; then
+        bwa index -p $genomeDirTop/mouse/BWA_Genome_Index/BWA_Genome_Index $genomeDirTop/mouse/Fasta_Files/GRCm38.primary_assembly.genome.fa && echo "DONE" &
+      else
+        echo "bwa index already found ... skipping"
+      fi
+    fi
+    if echo $toBuild | grep -q 's'; then
+      echo
+      echo "Processing Salmon index ... "
+      echo
+      if [ ! -f $genomeDirTop/mouse/Assembly_Files/decoyTranscripts/decoys.txt ]; then
+        bash $scriptDir/generateDecoyTranscriptome.sh -j $threads -a $genomeDirTop/mouse/Assembly_Files/Genes.gtf -g $genomeDirTop/mouse/Fasta_Files/GRCm38.primary_assembly.genome.fa -t $genomeDirTop/mouse/Fasta_Files/gencode.vM21.transcripts.fa -o $genomeDirTop/mouse/Assembly_Files/decoyTranscripts
+      else
+        echo "Decoy transcripts already found ... skipping "
+      fi
+      if [ ! -f $genomeDirTop/mouse/Salmon_Transcripts_Index/sa.bin ]; then
+        salmon index --gencode -t $genomeDirTop/mouse/Assembly_Files/decoyTranscripts/gentrome.fa -i $genomeDirTop/mouse/Salmon_Transcripts_Index/ -p $threads -d $genomeDirTop/mouse/Assembly_Files/decoyTranscripts/decoys.txt
+      else
+        echo "Salmon index already found ... skipping"
+      fi
+      echo "DONE"
+    fi
+    if echo $toBuild | grep -q 'S'; then
+      echo
+      echo "Processing STAR index ... "
+      echo
+      (mkdir $genomeDirTop/mouse/STAR_Genome_Index) &>/dev/null
+      if [ ! -f $genomeDirTop/mouse/STAR_Genome_Index/SA ]; then
+        STAR --runThreadN $threads --runMode genomeGenerate --genomeDir $genomeDirTop/mouse/STAR_Genome_Index/ --genomeFastaFiles $genomeDirTop/mouse/Fasta_Files/GRCm38.primary_assembly.genome.fa --sjdbGTFfile $genomeDirTop/mouse/Assembly_Files/Genes.gtf
+      else
+        echo "STAR index already found ... skipping"
+      fi
+      echo "DONE"
+    fi
+  fi
+  echo "$(date "+%m%d%Y %T") : Done building genome directory"
+}
+
+
+
+
+# Script to test for + merge technical replicates
+prepareFastqs() {
+  
+  if [ -z $synapseID ]; then 
+    echo Data/Raw_Reads/$line"_1.fastq"
+    if [ ! -f Data/Raw_Reads/$line"_1.fastq" ] && [ ! -f Data/QC/HTML/$line.html ] ; then
+      echo proceeding to techreps
+      techReps=$(Rscript $scriptDir/techReps.R $line $runInfo)
+      if [ ! -z "$noMerge" ]; then
+        techReps="no"
+      fi
+      echo $techReps
+      
+      if [ $techReps != "no" ]; then
+        if [ $techReps == "skip" ]; then
+          echo "Already merged siblings ... skipping"
+        else
+          echo "Technical replicates detected -- downloading and merging ..."
+          # Create temporary download dir
+          mkdir Data/tmp/toMerge
+          # Download all the SRA accessions for files to be merged
+          while read file
+          do
+            if [ $file != "V1" ]; then
+              # Download file
+              prefetch $file --output-file Data/tmp/toMerge/$file.sra
+              parallel-fastq-dump -t $threads -s Data/tmp/toMerge/$file.sra --split-files -O Data/tmp/toMerge --tmpdir Data/tmp &>/dev/null
+              rm Data/tmp/toMerge/$file.sra
+              # Cat first mate/SE reads
+              cat Data/tmp/toMerge/$file"_1.fastq" >> Data/Raw_Reads/$line"_1.fastq"
+              # Check to see if 2nd mate -- then merge if true
+              if [ -f Data/tmp/toMerge/$file"_2.fastq" ]; then
+                cat Data/tmp/toMerge/$file"_2.fastq" >> Data/Raw_Reads/$line"_2.fastq"
+              fi
+            fi
+          done < Data/tmp/runTempTable.txt     
+          wait
+          if [ -f Data/tmp/runTempTable.txt ]; then
+            rm Data/tmp/runTempTable.txt
+          fi
+          rm -rf Data/tmp/toMerge
+        fi
+      else
+        echo "No technical replicates detected -- grabbing fastq reads from SRA ..."
+        if [ ! -f Data/Raw_Reads/$line"_1.fastq" ]; then
+          echo $line
+          prefetch $line --output-file Data/Raw_Reads/$line.sra
+          parallel-fastq-dump -t $threads -s Data/Raw_Reads/$line.sra --split-files -O Data/Raw_Reads --tmpdir Data/tmp &>/dev/null
+          rm Data/Raw_Reads/$line.sra
+          #fastq-dump -O Data/Raw_Reads --split-files $line
+        fi
+      fi
+    else
+      echo $line"_1.fastq already exists and has been processed ... proceeding with pipeline ... "
+    fi
+  else 
+    if [ $line != "synID" ]; then
+      synapse login -u $synUserName -p $synPassword --rememberMe
+      (mkdir Data/Raw_Reads/synDownloadTmp) &>/dev/null
+      if [ $fileType == "fastq" ]; then
+        echo "FASTQ file input ... "
+        echo "Downloading fastq files and merging any technical replicates ... "
+        techReps=$(Rscript $scriptDir/techReps_Synapse.R $line $runInfo) # Checks for pre-existing files internally
+        
+        if [ "$techReps" != "no" ]; then
+          if [ "$techReps" == "skip" ]; then
+            echo "Already merged siblings ... skipping"
+          else
+            synapseName=$(echo "$techReps")
+            echo $synapseName
+            echo "DONE"
+          fi
+        else
+          echo "WARNING: Could not locate synapse ID in provided synapseMergeFile -- skipping"         
+        fi
+        
+        rm -rf Data/Raw_Reads/synDownloadTmp
+        
+      elif [ $fileType == "bam" ]; then
+        echo "BAM file input ... "
+        synapse get $line --downloadLocation Data/Raw_Reads/synDownloadTmp/
+        synapseName=$(ls Data/Raw_Reads/synDownloadTmp/)
+        filename=$(basename -- "$synapseName")
+        extension="${filename##*.}"
+        synapseName=$(basename $synapseName .bam)
+        if [ ! -f Data/Raw_Reads/$synapseName"_1.fastq" ]; then 
+          echo "Checking if paired or single end ... "
+          PETEST=$(samtools view -c -f 1 Data/Raw_Reads/synDownloadTmp/$synapseName.bam)
+          COMP=2000
+          if [ "$PETEST" -gt "$COMP" ]; then
+            echo "Read is paired end!"
+            (mkdir Data/Raw_Reads/bamSortTmp) &>/dev/null
+            echo "Sorting by read name ... "
+            samtools sort -n -@ $threads -o Data/Raw_Reads/bamSortTmp/$synapseName.bam Data/Raw_Reads/synDownloadTmp/$synapseName.bam
+            echo "DONE!"
+            echo "Converting to fastq ..."
+            bamToFastq -i Data/Raw_Reads/bamSortTmp/$synapseName.bam -fq Data/Raw_Reads/$synapseName"_1.fastq" -fq2 Data/Raw_Reads/$synapseName"_2.fastq" &>/dev/null 
+            echo "DONE"
+            echo "Removing old files ...  "
+            rm -rf Data/Raw_Reads/synDownloadTmp
+            rm -rf Data/Raw_Reads/bamSortTmp
+            echo "DONE"        
+          else
+            echo "Reads is single end!"
+            echo "Converting to fastq ..."
+            bamToFastq -i Data/Raw_Reads/synDownloadTmp/$synapseName.bam -fq Data/Raw_Reads/$synapseName"_1.fastq" &>/dev/null 
+            echo "DONE"
+            echo "Removing old files ... "
+            rm -rf Data/Raw_Reads/synDownloadTmp
+            echo "DONE"        
+          fi
+        fi
+      fi
+      line=$synapseName
+      echo $line  
+    fi
+  fi
+  
+  # Trim files
+  if [ ! -f Data/Raw_Reads/$line"_1.fastq" ]; then
+    echo "Nothing to run fastp on"
+  elif [ -f Data/QC/HTML/$line.html ]; then
+    echo "Fastp already run! Skipping ... "
+  elif [ -f Data/Raw_Reads/$line"_2.fastq" ]; then
+    # Fastp
+    if [ -z "$noFastp" ]; then
+      echo "Running FASTP on reads ... "
+      mv Data/Raw_Reads/$line"_1.fastq" Data/Raw_Reads/$line"_1.fq"
+      mv Data/Raw_Reads/$line"_2.fastq" Data/Raw_Reads/$line"_2.fq"
+      fastp -i Data/Raw_Reads/$line"_1.fq" -o Data/Raw_Reads/$line"_1.fastq" -I Data/Raw_Reads/$line"_2.fq" -O Data/Raw_Reads/$line"_2.fastq" -h Data/QC/HTML/$line.html -j Data/QC/JSON/$line.json -w $threads
+      rm Data/Raw_Reads/$line"_1.fq"
+      rm Data/Raw_Reads/$line"_2.fq"
+      echo "DONE"
+    fi
+  else
+    if [ -z "$noFastp" ]; then
+      echo "Running FASTP on reads ... "
+      mv Data/Raw_Reads/$line"_1.fastq" Data/Raw_Reads/$line"_1.fq"
+      fastp -i Data/Raw_Reads/$line"_1.fq" -o Data/Raw_Reads/$line"_1.fastq" -h Data/QC/HTML/$line.html -j Data/QC/JSON/$line.json -w $threads
+      rm Data/Raw_Reads/$line"_1.fq"
+      echo "DONE"
+    fi
+  fi
+}
+
+RNASeqPipeline() {
+  ## RNASeq mode main code ##
+  if echo $testsRNASeq | grep -q 's'; then
+    echo "Quantifying reads with salmon ... "
+    if [ ! -f Results/Salmon.out/$line/quant.sf ]; then
+      if [ $PE == "Yes" ]; then
+        salmon quant -i $genomeDir/Salmon_Transcripts_Index -l A -1 Data/Raw_Reads/$line"_1.fastq" -2 Data/Raw_Reads/$line"_2.fastq" --validateMappings -o Results/Salmon.out/$line -p $threads --gcBias
+      else
+        salmon quant -i $genomeDir/Salmon_Transcripts_Index -l A -r Data/Raw_Reads/$line"_1.fastq" --validateMappings -o Results/Salmon.out/$line -p $threads
+      fi
+    else
+      echo "Salmon results already found for "$line". Skipping ... "
+    fi
+    echo "DONE" 
+    echo
+  fi
+  if echo $testsRNASeq | grep -q 't'; then
+    echo "Quantifying transposable elements with TEcount ... "
+    (mkdir Data/Bam_Files/TE_Bams/$line) &>/dev/null
+    if [ ! -f Results/TEcount.out/$line.cntTable ]; then
+      if [ ! -f Data/Bam_Files/TE_Bams/$line/$line.bam ]; then
+        if [ $PE == "Yes" ]; then
+          STAR --winAnchorMultimapNmax 100 --outFilterMultimapNmax 100 --genomeDir $genomeDir/STAR_Genome_Index --runThreadN $threads --readFilesIn Data/Raw_Reads/$line"_1.fastq" Data/Raw_Reads/$line"_2.fastq" --outFileNamePrefix Data/Bam_Files/TE_Bams/$line/Result 
+        else
+          STAR --winAnchorMultimapNmax 100 --outFilterMultimapNmax 100 --genomeDir $genomeDir/STAR_Genome_Index --runThreadN $threads --readFilesIn Data/Raw_Reads/$line"_1.fastq" --outFileNamePrefix Data/Bam_Files/TE_Bams/$line/Result
+        fi
+        samtools view -b -@ $threads -o Data/Bam_Files/TE_Bams/$line/$line.bam Data/Bam_Files/TE_Bams/$line/ResultAligned.out.sam
+      fi
+      strand=$(Rscript $scriptDir/getStrandednessInfo.R $line)         
+      conda activate $condaEnv
+      (TEcount --verbose 3 --stranded $strand --GTF $genomeDir/Assembly_Files/Genes.gtf --TE $genomeDir/Assembly_Files/TE.gtf -b Data/Bam_Files/TE_Bams/$line/$line.bam --project Results/TEcount.out/$line && rm Data/Bam_Files/TE_Bams/$line/ResultAligned.out.sam && rm Data/Bam_Files/TE_Bams/$line/$line.bam && echo "Finished TE count for "$line) &> Data/Bam_Files/TE_Bams/$line/TEcountLog.txt &
+      conda deactivate
+    fi
+    echo "Sent to background (check Data/Bam_Files/TE_Bams/$line/TEcountLog.txt to monitor progress)"
+    echo
+  fi
+  if echo $testsRNASeq | grep -q 'f'; then
+    echo "Discovering fusion transcripts with STAR-Fusion ... "
+    ulimit -n 10000
+    
+    if [ $PE == "Yes" ] || [ ! -z $forceFusionSE ]; then
+      if [ ! -z $forceFusionSE ]; then
+        echo "Forcing STAR-Fusion in single-end mode --- this is not advised"
+      fi
+      if [ ! -z $starEnv ]; then
+        echo "Activating conda 2.7.0 environment."
+        conda activate $starEnv
+      fi
+      if [ $PE == "Yes" ]; then
+        STAR-Fusion --left_fq Data/Raw_Reads/$line"_1.fastq" --right_fq Data/Raw_Reads/$line"_2.fastq" --genome_lib_dir $genomeDir/ctat_genome_lib_build_dir/ --CPU $threads --output_dir Results/STAR-Fusion.out/$line --examine_coding_effect --FusionInspector inspect --FusionInspector validate --extract_fusion_reads && find Results/STAR-Fusion.out/$line -type f -size +1G -exec rm -rf {} \;
+      else
+        STAR-Fusion --left_fq Data/Raw_Reads/$line"_1.fastq" --genome_lib_dir $genomeDir/ctat_genome_lib_build_dir/ --CPU $threads --output_dir Results/STAR-Fusion.out/$line --examine_coding_effect --FusionInspector inspect --FusionInspector validate --extract_fusion_reads && find Results/STAR-Fusion.out/$line -type f -size +1G -exec rm -rf {} \;
+      fi      
+      
+      if [ ! -z $starEnv ]; then
+        conda deactivate
+      fi
+      echo "DONE"
+      echo
+    fi
+  fi
+  if echo $testsRNASeq | grep -q 'S'; then
+    echo "Finding spliced alignments with STAR ... "
+    # This code generates Bams for Splicing, QoRTS, and Leafcutter
+    (mkdir Data/Bam_Files/Splicing_Bams/$line) &>/dev/null
+    if [ ! -f Data/Bam_Files/Splicing_Bams/$line/$line.bai ]; then
+      if [ $PE == "Yes" ]; then
+        STAR --outSAMstrandField intronMotif --twopassMode Basic --genomeDir $genomeDir/STAR_Genome_Index --runThreadN $threads --readFilesIn Data/Raw_Reads/$line"_1.fastq" Data/Raw_Reads/$line"_2.fastq" --outFileNamePrefix Data/Bam_Files/Splicing_Bams/$line/Result
+      elif [ $PE == "No" ] && [ ! -z $forceSpliceSE ]; then
+        echo "Forcing Splicing STAR in single-end mode --- this is not advised"
+        STAR --outSAMstrandField intronMotif --twopassMode Basic --genomeDir $genomeDir/STAR_Genome_Index --runThreadN $threads --readFilesIn Data/Raw_Reads/$line"_1.fastq" --outFileNamePrefix Data/Bam_Files/Splicing_Bams/$line/Result
+      fi
+      samtools view -b -@ $threads -o Data/Bam_Files/Splicing_Bams/$line/$line.raw.bam Data/Bam_Files/Splicing_Bams/$line/ResultAligned.out.sam
+      samtools sort -@ $threads -o Data/Bam_Files/Splicing_Bams/$line/$line.bam Data/Bam_Files/Splicing_Bams/$line/$line.raw.bam 
+      samtools index Data/Bam_Files/Splicing_Bams/$line/$line.bam Data/Bam_Files/Splicing_Bams/$line/$line.bai
+      samtools index Data/Bam_Files/Splicing_Bams/$line/$line.bam 
+      rm Data/Bam_Files/Splicing_Bams/$line/ResultAligned.out.sam
+      rm Data/Bam_Files/Splicing_Bams/$line/$line.raw.bam
+    else
+      echo "Splicing STAR output already exists for "$line". Skipping ... "
+    fi
+    echo "DONE"
+    echo
+  fi
+}
+
+ChIPSeqPipeline() {
+  
+  (mkdir Data/Bam_Files/$line) &>/dev/null
+  if [ ! -f Data/Bam_Files/$line/$line.bam ]; then
+    echo "Aligning fastq files ... "
+    if [ $PE == "Yes" ]; then
+      if [ ! -z $strandSpecificBam ]; then
+        bwa mem -t $threads $genomeDir/BWA_Genome_Index/BWA_Genome_Index Data/Raw_Reads/$line"_1.fastq" Data/Raw_Reads/$line"_2.fastq" | samtools view -b -@ $threads - | samtools sort -@ $threads -o Data/Bam_Files/$line/$line.bam - && samtools index Data/Bam_Files/$line/$line.bam && bamCoverage -p $threads -b Data/Bam_Files/$line/$line.bam -o Data/Bam_Files/$line/$line.p.bw --normalizeUsing BPM --filterRNAstrand forward && bamCoverage -p $threads -b Data/Bam_Files/$line/$line.bam -o Data/Bam_Files/$line/$line.m.bw --normalizeUsing BPM --filterRNAstrand reverse && echo "DONE"          
+      else 
+        bwa mem -t $threads $genomeDir/BWA_Genome_Index/BWA_Genome_Index Data/Raw_Reads/$line"_1.fastq" Data/Raw_Reads/$line"_2.fastq" | samtools view -b -@ $threads - | samtools sort -@ $threads -o Data/Bam_Files/$line/$line.bam - && samtools index Data/Bam_Files/$line/$line.bam && bamCoverage -p $threads -b Data/Bam_Files/$line/$line.bam -o Data/Bam_Files/$line/$line.bw --normalizeUsing BPM && echo "DONE"
+      fi
+    else
+      
+      if [ ! -z $strandSpecificBam ]; then
+        bwa mem -t $threads $genomeDir/BWA_Genome_Index/BWA_Genome_Index Data/Raw_Reads/$line"_1.fastq" | samtools view -b -@ $threads - | samtools sort -@ $threads -o Data/Bam_Files/$line/$line.bam - && samtools index Data/Bam_Files/$line/$line.bam && bamCoverage -p $threads -b Data/Bam_Files/$line/$line.bam -o Data/Bam_Files/$line/$line.p.bw --normalizeUsing BPM --filterRNAstrand forward && bamCoverage -p $threads -b Data/Bam_Files/$line/$line.bam -o Data/Bam_Files/$line/$line.m.bw --normalizeUsing BPM --filterRNAstrand reverse && echo "DONE"          
+      else 
+        bwa mem -t $threads $genomeDir/BWA_Genome_Index/BWA_Genome_Index Data/Raw_Reads/$line"_1.fastq" | samtools view -b -@ $threads - | samtools sort -@ $threads -o Data/Bam_Files/$line/$line.bam - && samtools index Data/Bam_Files/$line/$line.bam && bamCoverage -p $threads -b Data/Bam_Files/$line/$line.bam -o Data/Bam_Files/$line/$line.bw --normalizeUsing BPM && echo "DONE"
+      fi
+      
+    fi
+    echo "DONE"
+    echo
+  else
+    echo "Already aligned fastq files for "$line". Skipping ... "    
+  fi
+  if [ ! -z $returnBamsOnly ]; then
+    echo "Returning bams only ... "
+    echo "No tests to be run."
+    conditionStr="skip"
+  else
+    conditionStr=$(Rscript $scriptDir/parseConditions.R $line $runInfo $groupInfo $accRunList)
+    echo $conditionStr
+  fi
+  
+
+  if [ "$conditionStr" == "skip" ]; then
+    echo "Continuing to next run ...  "
+  elif [ "$conditionStr" == "error" ]; then
+    usage
+    echo
+    echo "ERROR: Check your group file ... "
+    echo
+    exit 1
+  else
+    # This loop checks each entry in the file to determine the run parameters for MACS2 and deeptools
+    while read conditionLine
+    do
+      echo $conditionLine
+      groupName="$(echo $conditionLine | cut -d'+' -f1)"
+      outName="$(echo $conditionLine | cut -d'+' -f2)"
+      peakType="$(echo $conditionLine | cut -d'+' -f3)"
+      topBam="$(echo $conditionLine | cut -d'+' -f4)"
+      bottomBam="$(echo $conditionLine | cut -d'+' -f5)"
+      echo $outName
+      echo $peakType
+      echo $topBam
+      echo $bottomBam
+      (mkdir Results/bindingProfiles/$groupName) &>/dev/null
+      mkdir Results/bindingProfiles/$groupName/$outName && mkdir Results/bindingProfiles/$groupName/$outName/MACS2_Output && mkdir Results/bindingProfiles/$groupName/$outName/Deeptools_Output
+      if [ $peakType == "narrow" ]; then
+        if [ ! -f Results/bindingProfiles/$groupName/$outName/MACS2_Output/$outName"_peaks.narrowPeak" ]; then
+          if [ $PE == "Yes" ]; then
+            if [ $bottomBam == "None" ]; then
+              echo "No control supplied -- make sure to sanity check these peaks..."
+              (echo "No control supplied -- make sure to sanity check these peaks..." && conda activate $condaEnv && macs2 callpeak -f BAMPE --outdir Results/bindingProfiles/$groupName/$outName/MACS2_Output -n $outName -t $topBam && conda deactivate && echo "Finished macs2 for "$outName) &> Results/bindingProfiles/$groupName/$outName/MACS2_Output/macs2Log.txt &
+            else
+              (conda activate $condaEnv && macs2 callpeak -f BAMPE --outdir Results/bindingProfiles/$groupName/$outName/MACS2_Output -n $outName -t $topBam -c $bottomBam && conda deactivate && echo "Finished macs2 for "$outName) &> Results/bindingProfiles/$groupName/$outName/MACS2_Output/macs2Log.txt &
+            fi
+          else
+            if [ $bottomBam == "None" ]; then
+              echo "No control supplied -- make sure to sanity check these peaks..."
+              (echo "No control supplied -- make sure to sanity check these peaks..." && conda activate $condaEnv && macs2 callpeak -f BAM --outdir Results/bindingProfiles/$groupName/$outName/MACS2_Output -n $outName -t $topBam && conda deactivate && echo "Finished macs2 for "$outName) &> Results/bindingProfiles/$groupName/$outName/MACS2_Output/macs2Log.txt &
+            else
+              (conda activate $condaEnv && macs2 callpeak -f BAM --outdir Results/bindingProfiles/$groupName/$outName/MACS2_Output -n $outName -t $topBam -c $bottomBam && conda deactivate && echo "Finished macs2 for "$outName) &> Results/bindingProfiles/$groupName/$outName/MACS2_Output/macs2Log.txt &
+            fi
+          fi
+          echo 
+          echo "Running MACS2 on "$outName" group. View log file at Results/bindingProfiles/$groupName/$outName/MACS2_Output/macs2Log.txt"
+          echo
+        fi
+      else
+        if [ ! -f Results/bindingProfiles/$groupName/$outName/MACS2_Output/$outName"_peaks.broadPeak" ]; then
+          if [ $PE == "Yes" ]; then
+            if [ $bottomBam == "None" ]; then
+              echo "No control supplied -- make sure to sanity check these peaks..."
+              (echo "No control supplied -- make sure to sanity check these peaks..." && conda activate $condaEnv && macs2 callpeak -f BAMPE --broad --outdir Results/bindingProfiles/$groupName/$outName/MACS2_Output -n $outName -t $topBam && conda deactivate && echo "Finished macs2 for "$outName) &> Results/bindingProfiles/$groupName/$outName/MACS2_Output/macs2Log.txt &
+            else
+              (conda activate $condaEnv && macs2 callpeak -f BAMPE --broad --outdir Results/bindingProfiles/$groupName/$outName/MACS2_Output -n $outName -t $topBam -c $bottomBam && conda deactivate && echo "Finished macs2 for "$outName) &> Results/bindingProfiles/$groupName/$outName/MACS2_Output/macs2Log.txt &
+            fi
+          else
+            if [ $bottomBam == "None" ]; then
+              echo "No control supplied -- make sure to sanity check these peaks..."
+              (echo "No control supplied -- make sure to sanity check these peaks..." && conda activate $condaEnv && macs2 callpeak -f BAM --broad --outdir Results/bindingProfiles/$groupName/$outName/MACS2_Output -n $outName -t $topBam && conda deactivate && echo "Finished macs2 for "$outName) &> Results/bindingProfiles/$groupName/$outName/MACS2_Output/macs2Log.txt &
+            else
+              (conda activate $condaEnv && macs2 callpeak -f BAM --broad --outdir Results/bindingProfiles/$groupName/$outName/MACS2_Output -n $outName -t $topBam -c $bottomBam && conda deactivate && echo "Finished macs2 for "$outName) &> Results/bindingProfiles/$groupName/$outName/MACS2_Output/macs2Log.txt &
+            fi
+          fi
+          echo 
+          echo "Running MACS2 on "$outName" group. View log file at Results/bindingProfiles/$groupName/$outName/MACS2_Output/macs2Log.txt"
+          echo
+        fi
+      fi
+      
+      if [ $bottomBam != "None" ]; then
+        if [ ! -f Results/bindingProfiles/$groupName/$outName/Deeptools_Output/$outName.foldRatio.bw ]; then
+          bamCompare -b1 $topBam -b2 $bottomBam -o Results/bindingProfiles/$groupName/$outName/Deeptools_Output/$outName.foldRatio.bw -p $threads && echo "Finished Deeptools for "$outName 
+        fi  
+      fi
+      
+      # Make a reference for downstream
+      echo $conditionLine >> Code/downstreamSampleList.txt    
+        
+    done < $conditionStr
+    echo "Finished processing files in $groupName"
+    
+  fi
+  
+
+}
+
+
+
+
+
+
+

@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1570142422142.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "A93A93FD",
+    "lastKnownWriteTime" : 1580145423,
+    "last_content_update" : 1580145423180,
+    "path" : "~/bin/BishopLab_HTS_Pipeline_Files/parseConditions.R",
+    "project_path" : "parseConditions.R",
+    "properties" : {
+        "cursorPosition" : "9,4",
+        "scrollLine" : "0"
+    },
+    "relative_order" : 2,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

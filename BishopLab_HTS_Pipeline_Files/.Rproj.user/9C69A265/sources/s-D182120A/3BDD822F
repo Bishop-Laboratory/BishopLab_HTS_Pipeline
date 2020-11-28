@@ -1,0 +1,23 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1583418169989.000,
+    "dirty" : false,
+    "encoding" : "",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "3BDD822F",
+    "lastKnownWriteTime" : 1583418115,
+    "last_content_update" : 1583418169989,
+    "path" : null,
+    "project_path" : null,
+    "properties" : {
+        "id" : "cef956c75914472398a95c4422152212",
+        "name" : "jsonNow",
+        "title" : "jsonNow"
+    },
+    "relative_order" : 8,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "object_explorer"
+}

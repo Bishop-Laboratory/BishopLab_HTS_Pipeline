@@ -1,0 +1,23 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1578586069025.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "E6D133CD",
+    "lastKnownWriteTime" : 1578586199,
+    "last_content_update" : 1578586199379,
+    "path" : "~/bin/BishopLab_HTS_Pipeline_Files/techReps.R",
+    "project_path" : "techReps.R",
+    "properties" : {
+        "cursorPosition" : "37,11",
+        "scrollLine" : "0",
+        "tempName" : "Untitled1"
+    },
+    "relative_order" : 5,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

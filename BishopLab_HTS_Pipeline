@@ -1,0 +1,379 @@
+#!/bin/bash
+
+##### The complete Bishop Lab HTS Pipeline! #####
+
+# Get the install directory & Source helper functions
+binDir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+scriptDir=$binDir/BishopLab_HTS_Pipeline_Files
+source $scriptDir/helperFunctions.sh
+CONDA_PREFIX_NEW=$(Rscript $scriptDir/getCondaHome.R $CONDA_PREFIX)
+echo $CONDA_PREFIX_NEW
+source $CONDA_PREFIX_NEW/etc/profile.d/conda.sh
+
+# Argparse
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -m) mode="$2"; shift 2;;
+    -a) acc="$2"; shift 2;;
+    -l) accList="$2"; shift 2;;    
+    -p) projectDir="$2"; shift 2;;
+    -r) testsRNASeq="$2"; shift 2;;
+    -g) genomeDirTop="$2"; shift 2;;
+    -G) groupInfo="$2"; shift 2;;
+    -P) threads="$2"; shift 2;;
+    -c) condaEnv="$2"; shift 2;;
+    -t) toBuild="$2"; shift 2;;
+    
+    --mode=*) mode="${1#*=}"; shift 1;;
+    --toBuild=*) toBuild="${1#*=}"; shift 1;;
+    --SRP_accession=*) acc="${1#*=}"; shift 1;;
+    --SRA_list=*) accList="${1#*=}"; shift 1;;        
+    --project_dir=*) projectDir="${1#*=}"; shift 1;;
+    --testsRNASeq=*) testsRNASeq="${1#*=}"; shift 1;;
+    --genome_dir=*) genomeDirTop="${1#*=}"; shift 1;;
+    --groupFile=*) groupInfo="${1#*=}"; shift 1;;
+    --threads=*) threads="${1#*=}"; shift 1;;
+    --python27_env=*) condaEnv="${1#*=}"; shift 1;;
+    --starFusionEnv=*) starEnv="${1#*=}"; shift 1;;
+    --keepFastq) keepFastq="${1#*=}"; shift 1;;
+    --force_spliceSE) forceSpliceSE="${1#*=}"; shift 1;;
+    --returnBamsOnly) returnBamsOnly="${1#*=}"; shift 1;;
+    --noMerge) noMerge="${1#*=}"; shift 1;;
+    --force_fusionSE) forceFusionSE="${1#*=}"; shift 1;;
+    --runInfoFile=*) runInfo="${1#*=}"; shift 1;;
+    --noFastp) noFastp="${1#*=}"; shift 1;;
+    --ATAC) ATAC="${1#*=}"; shift 1;;
+    --downloadOnly) downloadOnly="${1#*=}"; shift 1;;
+    --synapseID=*) synapseID="${1#*=}"; shift 1;;
+    --synapseIDList=*) synapseIDList="${1#*=}"; shift 1;;         
+    --synUserName=*) synUserName="${1#*=}"; shift 1;;
+    --help) help="${1#*=}"; shift 1;;
+
+    -*) echo "unknown option: $1" >&2; exit 1;;
+    *) handle_argument "$1"; shift 1;;
+  esac
+done
+
+
+### Set default variables ###
+threads=${threads:=1}
+accList=${accList:="none"}
+acc=${acc:="none"}
+toBuild=${toBuild:="sSfb"}
+runInfo=${runInfo:="none"}
+testsRNASeq=${testsRNASeq:="stSf"}
+genomeDirTop=${genomeDirTop:=$scriptDir/genome_build}
+projectDir=${projectDir:=RNASeq_SRA_Pipeline_Project}
+projectDir=$(realpath $projectDir)
+
+### Validate user inputs ###
+echo
+echo "Validating user inputs & gathering run Info ... "
+echo
+# If specified, display usage info
+if [ ! -z "$help" ]; then
+  usage
+  exit 1
+fi
+# Make sure mode or downloadOnly is specified
+downloadStr="None"
+if [ -z "$downloadOnly" ] && [ -z "$mode" ]; then
+  usage
+  echo 
+  echo "ERROR: Specify --mode or specify --downloadOnly"
+  echo
+  exit 1
+elif [ ! -z "$downloadOnly" ]; then
+  downloadStr="Yes"
+  mode="downloadOnly"
+  echo 
+  echo "Only downloading data .. no analyses to be run .. "
+  echo
+elif [[ "$mode" != "genomeBuild" && "$mode" != "RNASeq" && "$mode" != "HiCSeq" && "$mode" != "ChIPSeq" ]]; then
+  usage
+  echo 
+  echo "ERROR: invalid --mode type supplied: "$mode
+  echo "Valid options are 'genomeBuild', 'RNASeq', 'HiCSeq', or 'ChIPSeq'"
+  echo
+  exit 1
+elif [ $mode == "genomeBuild" ]; then
+  species=${species:="both"}
+  # Run genome build function
+  (mkdir $genomeDirTop) &>/dev/null
+  logFile=$genomeDirTop/buildLog.$species.txt
+  (genomeBuild) |& tee $logFile 
+  exit 1
+fi
+# Make sure genome directory exists
+if [ ! -d $genomeDirTop ]; then
+  echo "ERROR: Genome directory not found at "$genomeDirTop
+  echo 
+  echo "Create a genome directory using the 'BishopLab_HTS_Pipeline -m genomeBuild' command." 
+  exit 1
+fi
+# Validate Mode-specific inputs
+if [ $mode == "RNASeq" ]; then
+  if echo $testsRNASeq | grep -q 't'; then
+    if [ -z ${condaEnv+x} ]; then
+      usage
+      echo "ERROR: To run TECount, user must supply name of a conda environment with python 2.7 and TEtoolkit installed."
+      echo
+      exit 1
+    fi
+    if echo $testsRNASeq | grep -q 's'; then
+      echo "Running TEcount and Salmon "
+    else
+      usage
+      echo
+      echo "ERROR: Cannot run TEcount without first running salmon. Select 's' in test options."
+      echo
+      exit 1
+    fi
+  fi
+elif [ $mode == "ChIPSeq" ]; then
+  if [ -z ${condaEnv+x} ]; then
+    usage
+    echo
+    echo "ERROR: To run ChIPSeq mode, user must supply name of a conda environment with python 2.7 and macs2 installed."
+    echo
+    exit 1
+  fi
+  if [ -z "$groupInfo" ]; then
+    usage
+    echo
+    echo "ERROR: Provide a Group File to run ChIPSeq mode ... "
+    echo
+    exit 1
+  fi
+fi
+# Make sure that username/password given if using synapse
+if [ ! -z "$synapseID" ] || [ ! -z "$synapseIDList" ]; then
+  if [ -z "$synUserName" ]; then
+    # Read Password
+    echo -n Synapse Username: 
+    read -s synUserName
+    echo
+  fi
+  # Read Password
+  echo -n Synapse Password: 
+  read -s synPassword
+  echo
+elif [ $acc == "none" ]; then
+  if [ $accList == "none" ]; then
+    if [ $runInfo == "none" ]; then
+      usage
+      echo "ERROR: No run information provided. Specify -a, -l, or --runInfo"
+      echo
+      exit 1  
+    else
+      echo "User has supplied their own run info file ... "
+    fi
+  fi
+fi
+# Warn user about time it takes to get info for an accession list
+if [ $accList != "none" ]; then
+    accList=$(realpath $accList) 
+    echo "Acquiring sample info will take longer with list input method depending on list size ... "
+fi  
+
+# Set working directory
+if [ ! -d $projectDir ]; then
+  mkdir $projectDir
+fi
+cd $projectDir
+
+# Create directory structure
+(
+mkdir Code
+mkdir Data
+mkdir Data/tmp
+mkdir Data/Raw_Reads
+mkdir Results
+if [ -z $noFastp ]; then
+  mkdir Data/QC
+  mkdir Data/QC/HTML
+  mkdir Data/QC/JSON
+fi
+if [ $mode == "RNASeq" ]; then
+  if echo $testsRNASeq | grep -q 'S'; then
+    mkdir Data/Bam_Files
+    mkdir Data/Bam_Files/Splicing_Bams
+  fi
+  if echo $testsRNASeq | grep -q 't'; then
+    mkdir Data/Bam_Files
+    mkdir Data/Bam_Files/TE_Bams
+    mkdir Results/TEcount.out
+  fi
+  
+  if echo $testsRNASeq | grep -q 's'; then
+    mkdir Results/Salmon.out
+  fi
+  if echo $testsRNASeq | grep -q 'f'; then
+    mkdir Results/STAR-Fusion.out
+  fi
+elif [ $mode == "ChIPSeq" ]; then
+  mkdir Data/Bam_Files
+  mkdir Results/bindingProfiles
+fi
+) &>/dev/null
+
+
+export TMPDIR=$projectDir/Data/tmp
+
+### Set additional parameters and gather run info ###
+if [ $runInfo != "none" ]; then
+  runInfoOld=$runInfo
+  dateSTR=$(date "+%Y.%m.%d_%H.%M.%S")
+  runInfo=Code/runInfo_$dateSTR.csv
+  cat $runInfoOld > $runInfo
+else
+  if [ ! -z "$synapseID" ] || [ ! -z "$synapseIDList" ]; then
+    synapseID=${synapseID:="none"}
+    synapseIDList=${synapseIDList:="none"} 
+    runInfo=$(Rscript $scriptDir/get_SYN_info.R $synapseID $synapseIDList $scriptDir) 
+    fileType=$(Rscript $scriptDir/checkExtension_Synapse.R $runInfo)
+  else
+    runInfo=$(Rscript $scriptDir/getRunInfo.R $acc $accList $downloadStr $mode) # Get Runinfo table and save a copy in the code dir
+  fi
+fi
+
+if [ ! -f $runInfo ]; then
+  usage
+  echo
+  echo $runInfo
+  exit 1
+fi
+
+echo "Finished processing runInfo table... output stored in "$runInfo # Prints success or failure message     
+# Save a copy in the code dir
+accName=$(basename $runInfo .csv)
+cat $runInfo | tr -s '\t' ',' | csvcut -c Run > Code/$accName.runList.txt
+logFile=Code/$accName.pipeLineLog.txt
+accRunList=Code/$accName.runList.txt
+
+
+### MAIN PIPELINE ###
+#Output stderr to a log file
+(
+  echo "$(date "+%m%d%Y %T") : Starting main pipline ... "
+  echo
+  echo "Run info table for accessions is: "$runInfo
+  echo "Run list is: "$accRunList
+  # This is needed for STAR later
+  ulimit -n 10000   
+    
+  # While loop -- grabs SRA accession and/or file name and performs opperations
+  while read line
+  do
+    if [ $line == "Run" ]; then
+      continue
+    fi
+    
+    # Get species info
+    species=$(Rscript $scriptDir/getSpecies.R $line $runInfo )
+    echo "Current run: "$line  
+    if [ ! "$species" == "human" ] && [ ! "$species" == "mouse" ]; then
+      echo
+      echo "WARNING: species for " $line " is an unrecognized type: '"$species"'. Skipping this accession ... "
+      echo
+      continue
+      
+    else
+      echo "Detected species: "$species
+      echo  
+    genomeDir=$genomeDirTop/$species
+      if [ ! -d $genomeDir ]; then
+        echo "ERROR: $species genome subdir not found -- exiting"
+        exit 1
+      fi
+    fi
+    # Download fastq files and merge tech replicates
+    prepareFastqs
+    if [ ! -z "$downloadOnly" ]; then
+      echo
+      echo "Download finished for "$line
+      echo "No tests to be run ... "
+      echo
+      continue
+    fi
+    
+    # Test paired or single end
+    PE=$(Rscript $scriptDir/getSeqType.R $line )
+
+    echo $PE
+        
+    # Mode switch
+    if [ $mode == "RNASeq" ]; then
+      RNASeqPipeline
+    elif [ $mode == "ChIPSeq" ]; then
+      ChIPSeqPipeline
+    elif [ $mode == "HiCSeq" ]; then
+      HiCSeqPipeline
+    else
+      echo "Unknown mode: "$mode
+      echo "Treating as downloadOnly mode."
+      continue
+    fi
+    
+    # Remove old files
+    if [ -z $keepFastq ]; then
+      rm Data/Raw_Reads/$line"_1.fastq"
+      if [ $PE == "Yes" ]; then
+        rm Data/Raw_Reads/$line"_2.fastq"
+      fi
+    fi
+    
+    echo "Finished processing "$line
+        
+  done < $accRunList
+  wait
+  
+  echo "$(date "+%m%d%Y %T") : Upstream done -- starting downstream analysis ... "
+  
+   # Mode switch
+  if [ $mode == "RNASeq" ]; then
+    #RNASeqPipelineDownstream
+    echo "RNASeqDownstream"
+  elif [ $mode == "ChIPSeq" ]; then
+    labels=$(Rscript $scriptDir/getLabels.R)
+    filesBam=$(find Data/Bam_Files/ -type f -name "*.bam")
+    echo $filesBam
+    echo $labels
+    (mkdir Results/bindingProfiles/QC) &>/dev/null
+    if [ ! -f Results/bindingProfiles/readCounts.tab ]; then
+      echo "Summarizing bams for QC ... "
+      multiBamSummary bins --bamfiles $filesBam --labels $labels --outFileName Results/bindingProfiles/QC/bamSummary.npz -p $threads --outRawCounts Results/bindingProfiles/readCounts.tab
+      echo "DONE"
+      echo
+    fi
+    if [ ! -f Results/bindingProfiles/QC/correlationHeatmap.png ]; then
+      echo "Plotting correlation heatmaps ... "
+      plotCorrelation -in Results/bindingProfiles/QC/bamSummary.npz -c pearson -p scatterplot -o Results/bindingProfiles/QC/correlationPlot.png --outFileCorMatrix Results/bindingProfiles/QC/correlationPlotMatrix.tab --removeOutliers
+      plotCorrelation -in Results/bindingProfiles/QC/bamSummary.npz -c pearson -p heatmap -o Results/bindingProfiles/QC/correlationHeatmap.png
+      echo "DONE"
+      echo
+    fi
+    if [ ! -f Results/bindingProfiles/QC/coveragePlot.png ]; then
+      echo "Plotting coverage ... "
+      plotCoverage --bamfiles $filesBam --labels $labels --plotFile Results/bindingProfiles/QC/coveragePlot.png --outRawCounts Results/bindingProfiles/rawCoverage.tab -p $threads
+      echo "DONE"
+      echo
+    fi
+  elif [ $mode == "HiCSeq" ]; then
+    #HiCSeqPipelineDownstream
+    echo "HiC downstream"
+  else
+    echo 
+    echo "No downstream analysis for mode: "$mode
+    echo
+    echo "$(date "+%m%d%Y %T") : Done"
+    exit 1
+  fi
+  
+  
+  
+  echo "$(date "+%m%d%Y %T") : Done"
+  
+) |& tee $logFile 
+
+

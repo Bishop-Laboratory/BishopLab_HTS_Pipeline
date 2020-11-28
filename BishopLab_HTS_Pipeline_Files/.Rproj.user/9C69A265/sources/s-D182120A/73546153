@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1573597003528.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "73546153",
+    "lastKnownWriteTime" : 1583419297,
+    "last_content_update" : 1583419297608,
+    "path" : "~/bin/BishopLab_HTS_Pipeline_Files/helperFunctions.sh",
+    "project_path" : "helperFunctions.sh",
+    "properties" : {
+        "cursorPosition" : "209,22",
+        "scrollLine" : "196"
+    },
+    "relative_order" : 4,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "sh"
+}
